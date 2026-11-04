@@ -250,7 +250,7 @@ textarea.in{resize:vertical;min-height:110px}
 .modal[hidden]{display:none}
 .sheet{background:var(--surface);border:1px solid var(--line);border-radius:18px;width:min(520px,100%);max-height:100%;overflow-y:auto;padding:20px;display:grid;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
 .sheet h2{margin:0;font-family:var(--display);font-size:19px}
-.sheet .acts{display:flex;gap:10px;flex-wrap:wrap}
+.sheet .acts{display:flex;gap:10px;flex-wrap:wrap;position:sticky;bottom:-20px;background:var(--surface);padding:12px 0 4px;margin-top:2px;border-top:1px solid var(--line);z-index:1}
 .sheet .acts .grow{flex:1}
 .ferr{color:var(--s-pending);font-weight:600;font-size:13px}
 #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom,0px));background:var(--nav);color:#fff;padding:10px 18px;border-radius:999px;font-weight:600;font-size:13.5px;z-index:70;box-shadow:0 6px 20px rgba(0,0,0,.3)}
@@ -652,7 +652,10 @@ function makeCloudDb(uid){
   function save(){try{localStorage.setItem(CK,JSON.stringify({items:cache.items,profile:cache.profile}))}catch(e){}}
   function fire(){subs.slice().forEach(function(f){f()})}
   function firePr(){psubs.slice().forEach(function(f){f()})}
+  var wseq=0,wflight=0;
   function clean(d){return JSON.parse(JSON.stringify(d))}
+  function same(a,b){return ['type','title','person','note','date','time','status','priority'].every(function(k){return String(a&&a[k]||'')===String(b&&b[k]||'')})}
+  function track(p){wflight++;wseq++;return p.then(function(r){wflight--;wseq++;return r},function(e){wflight--;wseq++;throw e})}
   function mkErr(e){return {code:(e&&e.code)||"cloud",message:friendlyErr(e)}}
   function wrap(p){return Promise.resolve(p).then(function(r){if(r&&r.error)throw mkErr(r.error);return r},function(e){throw mkErr(e)})}
   function nowIso(){return new Date().toISOString()}
@@ -662,15 +665,18 @@ function makeCloudDb(uid){
     id:id,
     set:function(d){
       d=clean(d);var rm=remindFor(d,lead());
-      return wrap(SB.from("items").upsert({user_id:uid,id:id,data:d,remind_at:rm,reminded:false,updated_at:nowIso()},{onConflict:"user_id,id"})).then(function(){cache.items[id]=d;cache.rem[id]=rm;save();fire()});
+      return track(wrap(SB.from("items").upsert({user_id:uid,id:id,data:d,remind_at:rm,reminded:false,updated_at:nowIso()},{onConflict:"user_id,id"}).select("id,data"))).then(function(r){
+        var got=r&&r.data&&r.data[0];if(got&&!same(got.data,d))throw {code:"mismatch",message:"the server kept older data for this entry. Reload the page and try again"};
+        cache.items[id]=(got&&got.data)||d;cache.rem[id]=rm;save();fire()});
     },
     update:function(p){
       var cur=cache.items[id];if(!cur)return Promise.reject({code:"invalid_argument",message:"that entry no longer exists"});
       var next=Object.assign({},cur,clean(p)),row={data:next,updated_at:nowIso()},rm;
       if(cur.date!==next.date||cur.time!==next.time||cur.status!==next.status){rm=remindFor(next,lead());row.remind_at=rm;row.reminded=false}
-      return wrap(SB.from("items").update(row).eq("id",id).select("id")).then(function(r){
+      return track(wrap(SB.from("items").update(row).eq("id",id).select("id,data"))).then(function(r){
         if(!r.data||!r.data.length)throw {code:"gone",message:"that entry no longer exists on the server"};
-        cache.items[id]=next;if(row.remind_at!==undefined)cache.rem[id]=rm;save();fire();
+        if(!same(r.data[0].data,next))throw {code:"mismatch",message:"the server kept older data for this entry. Reload the page and try again"};
+        cache.items[id]=r.data[0].data;if(row.remind_at!==undefined)cache.rem[id]=rm;save();fire();
       });
     },
     delete:function(){return wrap(SB.from("items").delete().eq("id",id)).then(function(){delete cache.items[id];delete cache.rem[id];save();fire()})},
@@ -688,7 +694,9 @@ function makeCloudDb(uid){
     }},
     doc:function(path){var q=path.split("/");return q[0]==="items"?itemRef(q[1]):profileRef()},
     refresh:function(){
+      var s0=wseq;
       return wrap(SB.from("items").select("id,data,remind_at").limit(10000)).then(function(r){
+        if(wflight>0||wseq!==s0){return new Promise(function(res){setTimeout(function(){res(db.refresh())},600)})} /* a save happened meanwhile: do not overwrite it with older data */
         var m={},rem={};(r.data||[]).forEach(function(x){m[x.id]=x.data||{};rem[x.id]=x.remind_at||null});
         cache.items=m;cache.rem=rem;save();fire();
       });
@@ -1342,8 +1350,10 @@ function viewDashboard(){
   var sched='<section class="card"><div class="cardhead"><h2>'+(isToday?"Today’s Schedule":esc(longDate(parse(st.sel))))+'</h2>'+(isToday?"":'<button class="btn ghost" data-act="seltoday">Back to today</button>')+'</div>'+chips+'<div>'+list+'</div></section>';
   var done=day.filter(function(i){return i.status==="done"}).length,prog=day.filter(function(i){return i.status==="progress"}).length,pend=day.length-done-prog;
   var C=2*Math.PI*44,frac=day.length?done/day.length:0;
-  var ring='<section class="card"><div class="cardhead"><h2>'+(isToday?"Today’s":"Day’s")+' Progress</h2></div><div class="ring"><svg viewBox="0 0 112 112" role="img" aria-label="'+done+' of '+day.length+' completed"><circle cx="56" cy="56" r="44" fill="none" stroke="var(--line)" stroke-width="10"/><circle cx="56" cy="56" r="44" fill="none" stroke="var(--s-done)" stroke-width="10" stroke-linecap="round" stroke-dasharray="'+(C*frac).toFixed(1)+' '+C.toFixed(1)+'" transform="rotate(-90 56 56)"/><text x="56" y="56" text-anchor="middle" style="fill:var(--fg);font-family:var(--display);font-weight:700;font-size:24px">'+done+'/'+day.length+'</text><text x="56" y="74" text-anchor="middle" style="fill:var(--muted);font-size:11px">Completed</text></svg>'+
-    '<div class="legend"><div><i style="background:var(--s-done)"></i>Completed<b class="tnum">'+done+'</b></div><div><i style="background:var(--task)"></i>In Progress<b class="tnum">'+prog+'</b></div><div><i style="background:var(--s-pending)"></i>Pending<b class="tnum">'+pend+'</b></div></div></div></section>';
+  var segs=[[done,"var(--s-done)"],[prog,"var(--s-progress)"],[pend,"var(--s-pending)"]].filter(function(x){return x[0]>0}),gap=segs.length>1?2.5:0,pos=0,arcs="";
+  if(day.length)segs.forEach(function(x){var len=C*x[0]/day.length,vis=Math.max(len-gap,0.5);arcs+='<circle cx="56" cy="56" r="44" fill="none" stroke="'+x[1]+'" stroke-width="10" stroke-dasharray="'+vis.toFixed(1)+' '+(C-vis).toFixed(1)+'" stroke-dashoffset="'+(-pos).toFixed(1)+'" transform="rotate(-90 56 56)"/>';pos+=len});
+  var ring='<section class="card"><div class="cardhead"><h2>'+(isToday?"Today’s":"Day’s")+' Progress</h2></div><div class="ring"><svg viewBox="0 0 112 112" role="img" aria-label="'+done+' of '+day.length+' completed"><circle cx="56" cy="56" r="44" fill="none" stroke="var(--line)" stroke-width="10"/><circle cx="56" cy="56" r="44" fill="none" stroke="var(--line)" stroke-width="0"/>'+arcs+'<text x="56" y="56" text-anchor="middle" style="fill:var(--fg);font-family:var(--display);font-weight:700;font-size:24px">'+done+'/'+day.length+'</text><text x="56" y="74" text-anchor="middle" style="fill:var(--muted);font-size:11px">Completed</text></svg>'+
+    '<div class="legend"><div><i style="background:var(--s-done)"></i>Completed<b class="tnum">'+done+'</b></div><div><i style="background:var(--s-progress)"></i>In Progress<b class="tnum">'+prog+'</b></div><div><i style="background:var(--s-pending)"></i>Pending<b class="tnum">'+pend+'</b></div></div></div></section>';
   var qa='<section class="card"><div class="cardhead"><h2>Quick Add</h2></div><div class="qa">'+TYPE_KEYS.map(function(t){return '<button class="btn q-'+t+'" data-act="add" data-type="'+t+'">'+ico(t==="task"?"i-plus":TYPES[t].icon)+' '+TYPES[t].label+'</button>'}).join("")+'</div></section>';
   var up=st.items.filter(function(i){return i.status!=="done"&&new Date(i.date+"T"+(i.time||"23:59"))>=now}).sort(cmp).slice(0,4);
   var upc='<section class="card upc"><div class="cardhead"><h2>Upcoming</h2></div><div class="up">'+(up.length?up.map(function(i){var T=TYPES[i.type]||TYPES.task;return '<div>'+ico(T.icon,"c-"+i.type)+'<span class="u-t">'+esc(T.label)+' – '+esc(i.title)+'</span><span class="u-d">'+dayLabel(i.date)+(i.time?", "+fmt12(i.time):"")+'</span></div>'}).join(""):'<span class="sub">Nothing coming up. Capture a note and it shows here.</span>')+'</div></section>';
@@ -1419,7 +1429,7 @@ function viewReports(){
     '<label class="f">Module<select class="in" id="rpModule">'+opt("all","All modules",r.module)+TYPE_KEYS.map(function(t){return opt(t,TYPES[t].plural,r.module)}).join("")+'</select></label>'+
     '<label class="f">Status<select class="in" id="rpStatus">'+opt("all","All statuses",r.status)+Object.keys(STATUS).map(function(s){return opt(s,STATUS[s],r.status)}).join("")+'</select></label>'+
     '<label class="f">Search<input class="in" id="rpQ" type="search" placeholder="Name, purpose, notes…" value="'+esc(r.q)+'"></label></div>'+
-    '<div class="rpbar"><div><small>REPORTING PERIOD</small><b>'+esc(rpLabel())+'</b></div><div class="rpbtns"><button class="btn wa" data-act="wa">'+ico("i-chat")+' WhatsApp Report</button><button class="btn" data-act="xlsx">'+ico("i-table")+' Excel Report</button><button class="btn" data-act="csv">'+ico("i-file")+' CSV</button></div></div></section>'+
+    '<div class="rpbar"><div><small>REPORTING PERIOD</small><b>'+esc(rpLabel())+'</b></div><div class="rpbtns"><button class="btn wa" data-act="plan">'+ico("i-chat")+' Morning Plan</button><button class="btn wa" data-act="wa">'+ico("i-chat")+' WhatsApp Report</button><button class="btn" data-act="xlsx">'+ico("i-table")+' Excel Report</button><button class="btn" data-act="csv">'+ico("i-file")+' CSV</button></div></div></section>'+
     '<div id="rpBody" style="display:grid;gap:16px;margin-top:16px">'+rpBody()+'</div>';
 }
 
@@ -1450,6 +1460,32 @@ function waText(){
   sec(7,"NEXT-DAY PRIORITIES ("+shortDate(nk)+")",next,{type:true});
   L.push("","*SUMMARY*","- Tasks completed: "+sm.taskDone,"- Tasks pending: "+sm.taskPend,"- Calls: "+sm.calls+" (completed "+sm.callsDone+")","- Meetings: "+sm.meetings,"- Site visits: "+sm.visits,"- Follow-ups: "+sm.followups,"- Overdue items: "+sm.overdue);
   return L.join("\n");
+}
+function planText(){
+  var now=nowIST(),today=ymd(now),n=0,L=[];
+  function line(it,withSince){
+    n++;var tl=timeLabel(it),t=TYPES[it.type]?TYPES[it.type].label:it.type;
+    var ti=String(it.title||""),hasT=ti.toLowerCase().replace(/[^a-z]/g,"").indexOf(t.toLowerCase().replace(/[^a-z]/g,""))===0;
+    var s=n+". "+(tl&&!withSince?tl+" – ":"")+(hasT?"":t+": ")+ti;
+    if(it.person&&String(it.title||"").toLowerCase().indexOf(String(it.person).toLowerCase())<0)s+=" ("+it.person+")";
+    if(withSince&&it.date&&it.date<today)s+=" (Pending since "+shortDay(it.date)+")";
+    return s;
+  }
+  var A=st.items.filter(function(i){return i.date===today&&i.type!=="followup"}).sort(cmp);
+  var B=st.items.filter(function(i){return i.status!=="done"&&((i.date&&i.date<today)||!i.date||(i.date===today&&i.type==="followup"))}).sort(function(a,b){
+    var fa=a.type==="followup"?1:0,fb=b.type==="followup"?1:0;return fa-fb||cmp(a,b)});
+  L.push("*DAILY WORK PLAN*","Date: "+longDate(now),"Prepared by: "+((st.settings&&st.settings.owner)||"Sanju Marandi"),"");
+  L.push("*A. TODAY'S SCHEDULE*");
+  if(!A.length)L.push("- No items scheduled");else A.forEach(function(i){L.push(line(i,false))});
+  L.push("","*B. PENDING & FOLLOW-UPS*");
+  if(!B.length)L.push("- Nothing pending");else B.forEach(function(i){L.push(line(i,true))});
+  L.push("","*Reply:* Please mark the completed items in the poll below by 6:00 PM.","Items not marked will be treated as pending and carried forward to tomorrow.");
+  return {txt:L.join("\n"),count:n};
+}
+function openPlan(){
+  var pl=planText(),m=$("#modal");
+  m.innerHTML='<div class="sheet wa" role="dialog" aria-label="Morning plan preview"><div class="wah"><div><h2>Morning Plan preview</h2><p>'+pl.count+' items. Create the poll with options 1 to '+pl.count+' (multiple answers ON). Nothing is sent automatically.</p></div><button class="icb wax" data-act="closemodal" aria-label="Close">'+ico("i-x")+'</button></div><pre class="wapre" id="waTxt">'+esc(pl.txt)+'</pre><div class="acts waf"><button class="btn" data-act="closemodal">Close</button><button class="btn primary wab" data-act="plancopy">'+ico("i-copy")+' Copy Plan</button></div></div>';
+  m.hidden=false;
 }
 function openWA(){
   var txt=waText(),m=$("#modal");
@@ -1531,6 +1567,7 @@ function viewPrefs(){
   else if(st.inst.ev)ib='<div class="sub">Install PA Desk Pro as an app with its own icon and window.</div><div><button class="btn primary" data-act="install">Install app</button></div>';
   else ib='<div class="sub">To install: in Chrome or Edge open the menu (⋮) and choose <b>Install app</b> or <b>Add to Home screen</b>.</div>';
   h+='<section class="card stack"><h2>Install</h2>'+ib+'</section>';
+  h+='<div class="sub" style="text-align:center">PA Desk Pro · version 2026-11-02-b</div>';
   return h+'</div></div>';
 }
 
@@ -1668,7 +1705,14 @@ function openForm(o){
     var data=decorate({type:f.type.value,title:title,person:f.person.value.trim(),note:f.note.value.trim(),date:f.date.value,time:f.time.value,period:f.time.value?"":(it&&it.period||""),status:f.status.value,priority:f.priority.value,doneDate:done?(it&&it.doneDate||ymd(nowIST())):"",createdAt:it&&it.createdAt||Date.now()});
     if(it&&it.raw)data.raw=it.raw;
     var ref=it?st.db.doc("items/"+it.id):st.db.collection("items").doc();
-    ref.set(data).then(function(){closeModal();toast("Saved")}).catch(function(e){setErr("Could not save ("+(e&&(e.message||e.code)||"error")+"). Try again.")});
+    var sb=f.querySelector('button[type=submit]');if(sb){if(sb.disabled)return;sb.disabled=true;sb.textContent="Saving…"}
+    var reset=function(){if(sb){sb.disabled=false;sb.textContent="Save"}};
+    Promise.resolve().then(function(){return it?ref.update(data):ref.set(data)}).then(function(){
+      var rid=it?it.id:ref.id,ix=-1;st.items.forEach(function(x,i){if(x.id===rid)ix=i});
+      if(ix>=0)st.items[ix]=Object.assign({},st.items[ix],data,{id:rid});else st.items.push(Object.assign({id:rid},data));
+      st.hl=rid;closeModal();toast("Saved");render();
+      clearTimeout(qcMsg.t);qcMsg.t=setTimeout(function(){st.hl=null;render()},4000);
+    }).catch(function(e){reset();var m="Not saved: "+((e&&(e.message||e.code))||"unknown error")+". Nothing was changed.";setErr(m);if(typeof toast2==="function")toast2(m,true)});
   });
 }
 
@@ -1695,11 +1739,17 @@ function act(el,e){
     case "qcedit":if(!qcNeedsConfirm())st.qc.edit=!st.qc.edit;qcRenderPreview();break;
     case "qcalt":st.qc.ov.date=el.dataset.d;qcRenderPreview();break;
     case "delask":
-      if(el.classList.contains("armed")){if(!needDb())return;st.db.doc("items/"+id).delete().then(function(){closeModal();toast("Deleted")}).catch(function(er){setErr("Could not delete ("+(er&&(er.message||er.code)||"error")+")")})}
+      if(el.classList.contains("armed")){if(!needDb())return;st.db.doc("items/"+id).delete().then(function(){st.items=st.items.filter(function(x){return x.id!==id});closeModal();toast("Deleted");render()}).catch(function(er){setErr("Could not delete ("+(er&&(er.message||er.code)||"error")+")")})}
       else{el.classList.add("armed");el.textContent="Tap again to delete"}
       break;
     case "rpmode":st.rp.mode=el.dataset.v;render();break;
     case "wa":openWA();break;
+    case "plan":openPlan();break;
+    case "plancopy":
+      var ptxt=planText().txt;
+      var psel=function(){var pre=$("#waTxt"),r=document.createRange();r.selectNodeContents(pre);var s=window.getSelection();s.removeAllRanges();s.addRange(r);toast("Select and copy the text")};
+      try{navigator.clipboard.writeText(ptxt).then(function(){toast("Plan copied")},psel)}catch(er){psel()}
+      break;
     case "wacopy":
       var txt=waText();
       var sel=function(){var pre=$("#waTxt"),r=document.createRange();r.selectNodeContents(pre);var s=window.getSelection();s.removeAllRanges();s.addRange(r);toast("Select and copy the text")};
